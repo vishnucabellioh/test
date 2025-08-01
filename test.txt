@@ -22,12 +22,9 @@ dataset_size = len(hf_dataset)
 print(f"Dataset size: {dataset_size}")
 
 # Initialize variables for computing statistics
-running_sum = None
-running_sum_sq = None
 running_count = 0
 global_min = float('inf')
 global_max = float('-inf')
-avg_spectrogram = None
 
 # First pass: find global min/max for histogram bins
 print("First pass: determining global min/max...")
@@ -35,73 +32,83 @@ for i in range(0, dataset_size, args.batch_size):
     batch_end = min(i + args.batch_size, dataset_size)
     batch_indices = list(range(i, batch_end))
     
-    batch_data = []
     for idx in batch_indices:
         img = hf_dataset[idx]["spectrogram"]
         if isinstance(img, Image.Image):
             img_array = np.array(img)
         else:
             img_array = img
-        batch_data.append(img_array)
-    
-    batch_array = np.stack(batch_data, axis=2)
-    batch_min = np.min(batch_array)
-    batch_max = np.max(batch_array)
-    global_min = min(global_min, batch_min)
-    global_max = max(global_max, batch_max)
+        
+        batch_min = np.min(img_array)
+        batch_max = np.max(img_array)
+        global_min = min(global_min, batch_min)
+        global_max = max(global_max, batch_max)
+
+# Print summary after the first pass
+print(f"First pass completed. Global Min: {global_min:.2f}, Global Max: {global_max:.2f}")
 
 # Initialize histogram bins
 n_bins = 100
 hist_bins = np.linspace(global_min, global_max, n_bins + 1)
 hist_counts = np.zeros(n_bins)
 
+# Initialize variables for global statistics
+total_sum = 0
+total_sum_sq = 0
+total_pixel_count = 0
+
 # Process data in batches
 for i in range(0, dataset_size, args.batch_size):
     batch_end = min(i + args.batch_size, dataset_size)
     batch_indices = list(range(i, batch_end))
     
-    print(f"Processing batch {i//args.batch_size + 1}: samples {i+1}-{batch_end}")
+    # Initialize batch statistics
+    batch_pixel_count = 0
+    batch_sum = 0
+    batch_sum_sq = 0
+    batch_min = float('inf')
+    batch_max = float('-inf')
     
-    # Load batch of spectrograms
-    batch_data = []
     for idx in batch_indices:
         img = hf_dataset[idx]["spectrogram"]
         if isinstance(img, Image.Image):
             img_array = np.array(img)
         else:
             img_array = img
-        batch_data.append(img_array)
+        
+        # Update batch statistics
+        batch_sum += np.sum(img_array)
+        batch_sum_sq += np.sum(img_array**2)
+        batch_pixel_count += img_array.size
+        batch_min = min(batch_min, np.min(img_array))
+        batch_max = max(batch_max, np.max(img_array))
+        
+        # Update global statistics
+        total_sum += np.sum(img_array)
+        total_sum_sq += np.sum(img_array**2)
+        total_pixel_count += img_array.size
+        running_count += 1
+        
+        # Update histogram
+        img_hist, _ = np.histogram(img_array.flatten(), bins=hist_bins)
+        hist_counts += img_hist
     
-    # Stack batch data
-    batch_array = np.stack(batch_data, axis=2)
+    # Compute batch statistics
+    batch_mean = batch_sum / batch_pixel_count
+    batch_variance = (batch_sum_sq / batch_pixel_count) - (batch_mean**2)
+    batch_std = np.sqrt(batch_variance)
     
-    # Initialize running statistics on first batch
-    if running_sum is None:
-        running_sum = np.zeros(batch_array.shape[:2])
-        running_sum_sq = np.zeros(batch_array.shape[:2])
-        avg_spectrogram = np.zeros(batch_array.shape[:2])
-    
-    # Update running statistics
-    batch_sum = np.sum(batch_array, axis=2)
-    batch_sum_sq = np.sum(batch_array**2, axis=2)
-    running_sum += batch_sum
-    running_sum_sq += batch_sum_sq
-    running_count += batch_array.shape[2]
-    
-    # Update histogram
-    batch_hist, _ = np.histogram(batch_array.flatten(), bins=hist_bins)
-    hist_counts += batch_hist
+    # Print batch statistics in one line
+    print(f"Processing batch {i//args.batch_size + 1}: samples {i+1}-{batch_end} | "
+          f"Mean: {batch_mean:.2f}, Std: {batch_std:.2f}, Min: {batch_min:.2f}, Max: {batch_max:.2f}")
 
 print(f"Total samples processed: {running_count}")
+print(f"Total pixels processed: {total_pixel_count}")
 
 # Compute final statistics
-global_mean = running_sum / running_count
-global_variance = (running_sum_sq / running_count) - (global_mean**2)
-global_std = np.sqrt(np.mean(global_variance))
-global_mean_scalar = np.mean(global_mean)
-
-# Compute average spectrogram
-avg_spectrogram = global_mean
+global_mean_scalar = total_sum / total_pixel_count
+global_variance = (total_sum_sq / total_pixel_count) - (global_mean_scalar**2)
+global_std = np.sqrt(global_variance)
 
 print(f"Global Mean: {global_mean_scalar:.2f}, Std: {global_std:.2f}, Min: {global_min:.2f}, Max: {global_max:.2f}")
 
@@ -121,16 +128,6 @@ print(f"25th Quantile: {q25:.2f}, 50th Quantile: {q50:.2f}, 75th Quantile: {q75:
 first_sample = np.array(hf_dataset[0]["spectrogram"])
 time_profile = np.mean(first_sample, axis=0)
 frequency_profile = np.mean(first_sample, axis=1)
-
-# Plot average spectrogram
-plt.figure(figsize=(10,6))
-plt.imshow(avg_spectrogram, aspect='auto', origin='lower', cmap='viridis')
-plt.title("Average Spectrogram (across samples)")
-plt.xlabel("Time")
-plt.ylabel("Frequency")
-plt.colorbar(label="Amplitude")
-plt.tight_layout()
-plt.show()
 
 # Plot histogram of all amplitude values
 plt.figure(figsize=(8,5))
