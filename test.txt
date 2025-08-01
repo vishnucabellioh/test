@@ -1,0 +1,158 @@
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+from datasets import load_from_disk
+import argparse
+from PIL import Image  # <-- added import
+
+# Argument parsing to pass dataset path from CLI
+parser = argparse.ArgumentParser(description="Analyze spectrogram statistics from an HF dataset.")
+parser.add_argument("--dataset_path", type=str, default=".../data/hf",
+                    help="Path to the HF dataset directory.")
+parser.add_argument("--batch_size", type=int, default=10,
+                    help="Batch size for processing spectrograms.")
+args = parser.parse_args()
+
+# Load the HF dataset
+print("Loading dataset from:", args.dataset_path)
+hf_dataset = load_from_disk(args.dataset_path)
+
+# Get dataset info
+dataset_size = len(hf_dataset)
+print(f"Dataset size: {dataset_size}")
+
+# Initialize variables for computing statistics
+running_sum = None
+running_sum_sq = None
+running_count = 0
+global_min = float('inf')
+global_max = float('-inf')
+avg_spectrogram = None
+
+# First pass: find global min/max for histogram bins
+print("First pass: determining global min/max...")
+for i in range(0, dataset_size, args.batch_size):
+    batch_end = min(i + args.batch_size, dataset_size)
+    batch_indices = list(range(i, batch_end))
+    
+    batch_data = []
+    for idx in batch_indices:
+        img = hf_dataset[idx]["spectrogram"]
+        if isinstance(img, Image.Image):
+            img_array = np.array(img)
+        else:
+            img_array = img
+        batch_data.append(img_array)
+    
+    batch_array = np.stack(batch_data, axis=2)
+    batch_min = np.min(batch_array)
+    batch_max = np.max(batch_array)
+    global_min = min(global_min, batch_min)
+    global_max = max(global_max, batch_max)
+
+# Initialize histogram bins
+n_bins = 100
+hist_bins = np.linspace(global_min, global_max, n_bins + 1)
+hist_counts = np.zeros(n_bins)
+
+# Process data in batches
+for i in range(0, dataset_size, args.batch_size):
+    batch_end = min(i + args.batch_size, dataset_size)
+    batch_indices = list(range(i, batch_end))
+    
+    print(f"Processing batch {i//args.batch_size + 1}: samples {i+1}-{batch_end}")
+    
+    # Load batch of spectrograms
+    batch_data = []
+    for idx in batch_indices:
+        img = hf_dataset[idx]["spectrogram"]
+        if isinstance(img, Image.Image):
+            img_array = np.array(img)
+        else:
+            img_array = img
+        batch_data.append(img_array)
+    
+    # Stack batch data
+    batch_array = np.stack(batch_data, axis=2)
+    
+    # Initialize running statistics on first batch
+    if running_sum is None:
+        running_sum = np.zeros(batch_array.shape[:2])
+        running_sum_sq = np.zeros(batch_array.shape[:2])
+        avg_spectrogram = np.zeros(batch_array.shape[:2])
+    
+    # Update running statistics
+    batch_sum = np.sum(batch_array, axis=2)
+    batch_sum_sq = np.sum(batch_array**2, axis=2)
+    running_sum += batch_sum
+    running_sum_sq += batch_sum_sq
+    running_count += batch_array.shape[2]
+    
+    # Update histogram
+    batch_hist, _ = np.histogram(batch_array.flatten(), bins=hist_bins)
+    hist_counts += batch_hist
+
+print(f"Total samples processed: {running_count}")
+
+# Compute final statistics
+global_mean = running_sum / running_count
+global_variance = (running_sum_sq / running_count) - (global_mean**2)
+global_std = np.sqrt(np.mean(global_variance))
+global_mean_scalar = np.mean(global_mean)
+
+# Compute average spectrogram
+avg_spectrogram = global_mean
+
+print(f"Global Mean: {global_mean_scalar:.2f}, Std: {global_std:.2f}, Min: {global_min:.2f}, Max: {global_max:.2f}")
+
+# Compute quantiles from histogram
+cumulative_counts = np.cumsum(hist_counts)
+total_count = cumulative_counts[-1]
+q25_idx = np.searchsorted(cumulative_counts, 0.25 * total_count)
+q50_idx = np.searchsorted(cumulative_counts, 0.50 * total_count)
+q75_idx = np.searchsorted(cumulative_counts, 0.75 * total_count)
+
+q25 = hist_bins[q25_idx]
+q50 = hist_bins[q50_idx]
+q75 = hist_bins[q75_idx]
+print(f"25th Quantile: {q25:.2f}, 50th Quantile: {q50:.2f}, 75th Quantile: {q75:.2f}")
+
+# Get first sample for profile analysis
+first_sample = np.array(hf_dataset[0]["spectrogram"])
+time_profile = np.mean(first_sample, axis=0)
+frequency_profile = np.mean(first_sample, axis=1)
+
+# Plot average spectrogram
+plt.figure(figsize=(10,6))
+plt.imshow(avg_spectrogram, aspect='auto', origin='lower', cmap='viridis')
+plt.title("Average Spectrogram (across samples)")
+plt.xlabel("Time")
+plt.ylabel("Frequency")
+plt.colorbar(label="Amplitude")
+plt.tight_layout()
+plt.show()
+
+# Plot histogram of all amplitude values
+plt.figure(figsize=(8,5))
+bin_centers = (hist_bins[:-1] + hist_bins[1:]) / 2
+plt.bar(bin_centers, hist_counts, width=np.diff(hist_bins), color='skyblue', edgecolor='black', alpha=0.7)
+plt.title("Histogram of All Amplitude Values")
+plt.xlabel("Amplitude")
+plt.ylabel("Frequency")
+plt.tight_layout()
+plt.show()
+
+# Plot time and frequency profiles for the first spectrogram sample
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10,8))
+
+ax1.plot(time_profile, color='red')
+ax1.set_title("Time-wise Mean Amplitude (First Sample)")
+ax1.set_xlabel("Time")
+ax1.set_ylabel("Mean Amplitude")
+
+ax2.plot(frequency_profile, color='blue')
+ax2.set_title("Frequency-wise Mean Amplitude (First Sample)")
+ax2.set_xlabel("Frequency")
+ax2.set_ylabel("Mean Amplitude")
+plt.tight_layout()
+plt.show()
